@@ -87,6 +87,10 @@ from prompts.agent_prompt_astock import (STOP_SIGNAL,
 from tools.general_tools import (extract_conversation, extract_tool_messages,
                                  get_config_value, write_config_value)
 from tools.price_tools import add_no_trade_record
+from tools.trading_db import (
+    init_db, get_latest_position, append_position, append_no_trade_record,
+    get_position_history, check_position_exists, get_db_path
+)
 
 # Load environment variables
 load_dotenv()
@@ -233,7 +237,11 @@ class BaseAgentAStock:
 
         # Data paths
         self.data_path = os.path.join(self.base_log_path, self.signature)
-        self.position_file = os.path.join(self.data_path, "position", "position.jsonl")
+
+        # Database setup for A-shares
+        self._db_market = "astock"
+        self._db_path = get_db_path(self._db_market)
+        init_db(self._db_path)
 
     def _get_default_mcp_config(self) -> Dict[str, Dict[str, Any]]:
         """Get default MCP configuration"""
@@ -426,16 +434,10 @@ class BaseAgentAStock:
 
     def register_agent(self) -> None:
         """Register new agent, create initial positions"""
-        # Check if position.jsonl file already exists
-        if os.path.exists(self.position_file):
-            print(f"⚠️ Position file {self.position_file} already exists, skipping registration")
+        # Check if position already exists in database
+        if check_position_exists(self.signature, self._db_path):
+            print(f"⚠️ Position for {self.signature} already exists in database, skipping registration")
             return
-
-        # Ensure directory structure exists
-        position_dir = os.path.join(self.data_path, "position")
-        if not os.path.exists(position_dir):
-            os.makedirs(position_dir)
-            print(f"📁 Created position directory: {position_dir}")
 
         # Create initial positions
         init_position = {symbol: 0 for symbol in self.stock_symbols}
@@ -455,11 +457,19 @@ class BaseAgentAStock:
                     # Fallback: keep original if unexpected
                     pass
 
-        with open(self.position_file, "w") as f:  # Use "w" mode to ensure creating new file
-            f.write(json.dumps({"date": init_date_str, "id": 0, "positions": init_position}) + "\n")
+        append_position(
+            signature=self.signature,
+            date=init_date_str,
+            action_type="init",
+            symbol="",
+            amount=0,
+            positions=init_position,
+            db_path=self._db_path,
+            market=self._db_market
+        )
 
         print(f"✅ A-shares agent {self.signature} registration completed")
-        print(f"📁 Position file: {self.position_file}")
+        print(f"📁 Database: {self._db_path}")
         print(f"💰 Initial cash: ¥{self.initial_cash:,.2f}")
         print(f"📊 Number of stocks: {len(self.stock_symbols)}")
 
@@ -476,25 +486,14 @@ class BaseAgentAStock:
         """
         from tools.price_tools import is_trading_day
 
-        dates = []
-        max_date = None
-
-        if not os.path.exists(self.position_file):
+        # Check if position exists in database
+        if not check_position_exists(self.signature, self._db_path):
             self.register_agent()
             max_date = init_date
         else:
-            # Read existing position file, find latest date
-            with open(self.position_file, "r") as f:
-                for line in f:
-                    doc = json.loads(line)
-                    current_date = doc["date"]
-                    if max_date is None:
-                        max_date = current_date
-                    else:
-                        current_date_obj = datetime.strptime(current_date, "%Y-%m-%d")
-                        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
-                        if current_date_obj > max_date_obj:
-                            max_date = current_date
+            # Get latest position from database
+            latest_pos, _ = get_latest_position(self.signature, self._db_path, self._db_market)
+            max_date = latest_pos.get("date", init_date)
 
         # Check if new dates need to be processed
         max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
@@ -572,13 +571,12 @@ class BaseAgentAStock:
 
     def get_position_summary(self) -> Dict[str, Any]:
         """Get position summary"""
-        if not os.path.exists(self.position_file):
-            return {"error": "Position file does not exist"}
+        # Check if position exists in database
+        if not check_position_exists(self.signature, self._db_path):
+            return {"error": "Position does not exist in database"}
 
-        positions = []
-        with open(self.position_file, "r") as f:
-            for line in f:
-                positions.append(json.loads(line))
+        # Get position history from database
+        positions = get_position_history(self.signature, self._db_path)
 
         if not positions:
             return {"error": "No position records"}

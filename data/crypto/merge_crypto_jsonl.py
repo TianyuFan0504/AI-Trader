@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Merge crypto daily price JSON files into a single JSONL file with automatic symbol fixing.
+Merge crypto daily price JSON files to SQLite database.
 
 This script:
-1. Merges individual crypto daily price JSON files into crypto_merged.jsonl
-2. Renames price fields (open→buy price, close→sell price)
-3. Automatically adds -USDT suffix to crypto symbols (e.g., BTC → BTC-USDT)
-4. Creates backups of existing files
-5. Verifies the symbol fixes were applied correctly
+1. Reads individual crypto daily price JSON files from coin/ directory
+2. Saves them to the prices database
+3. Automatically adds -USDT suffix to crypto symbols
 
 Usage:
-    python merge_crypto_jsonl.py
+    python data/crypto/merge_crypto_jsonl.py
 
 The individual crypto files should be located in the 'coin/' subdirectory
 and follow the naming pattern: daily_prices_{SYMBOL}.json
@@ -19,13 +17,17 @@ and follow the naming pattern: daily_prices_{SYMBOL}.json
 import glob
 import json
 import os
-import shutil
+import sys
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv()
+# Add project root to path
+project_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project_root))
 
-# Major cryptocurrencies against USDT (using USD as proxy on Alpha Vantage)
+from tools.trading_db import init_db, add_price, get_db_path
+
+
+# Major cryptocurrencies against USDT
 crypto_symbols_usdt = [
     "BTC",   # Bitcoin/USDT
     "ETH",   # Ethereum/USDT
@@ -39,118 +41,48 @@ crypto_symbols_usdt = [
     "DOT",   # Polkadot/USDT
 ]
 
-def backup_crypto_data():
-    """Create a backup of the existing crypto_merged.jsonl file if it exists"""
-    crypto_file = Path(output_file)
-    backup_file = Path(output_file + ".backup")
 
-    if crypto_file.exists():
-        shutil.copy2(crypto_file, backup_file)
-        print(f"✅ Created backup: {backup_file}")
-        return True
-    else:
-        print(f"ℹ️  No existing file to backup: {crypto_file}")
-        return False
+def merge_to_db():
+    """Merge crypto JSON files to database."""
+    # Initialize database
+    db_path = get_db_path("prices")
+    init_db(db_path)
+    print(f"Database: {db_path}")
 
-def verify_symbol_fixes():
-    """Verify that all symbols in the merged file have -USDT suffix"""
-    crypto_file = Path(output_file)
+    current_dir = Path(__file__).parent
+    coin_dir = current_dir / "coin"
 
-    print("\n🔍 Verifying symbol fixes...")
+    if not coin_dir.exists():
+        print(f"Error: coin/ directory not found: {coin_dir}")
+        return
 
-    if not crypto_file.exists():
-        print(f"❌ File not found: {crypto_file}")
-        return False
+    pattern = coin_dir / "daily_prices_*.json"
+    files = sorted(glob.glob(str(pattern)))
 
-    try:
-        symbols_found = set()
-        usdt_count = 0
-        total_lines = 0
-        transformations = {}
+    if not files:
+        print("No crypto daily price files found!")
+        return
 
-        with open(crypto_file, 'r', encoding='utf-8') as f:
-            for line_num, line in enumerate(f, 1):
-                if not line.strip():
-                    continue
+    print(f"Found {len(files)} crypto files to process")
 
-                try:
-                    data = json.loads(line.strip())
-                    meta = data.get("Meta Data", {})
-                    symbol = meta.get("2. Symbol", "")
+    count = 0
+    processed = 0
+    skipped = 0
 
-                    if symbol:
-                        symbols_found.add(symbol)
-                        total_lines += 1
-
-                        if symbol.endswith("-USDT"):
-                            usdt_count += 1
-                        else:
-                            # Record symbols that need fixing
-                            base_symbol = symbol.replace("-USDT", "")
-                            transformations[symbol] = f"{base_symbol}-USDT"
-
-                        if line_num <= 5:  # Show first few examples
-                            print(f"  Line {line_num}: {symbol}")
-
-                    if line_num == 10:  # Stop after showing examples
-                        break
-
-                except json.JSONDecodeError:
-                    continue
-
-        print(f"\n✅ Verification Results:")
-        print(f"  📊 Total symbols checked: {total_lines}")
-        print(f"  🎯 Symbols with -USDT: {usdt_count}")
-        print(f"  📈 Unique symbols: {len(symbols_found)}")
-
-        if transformations:
-            print(f"  ⚠️  Symbols that need fixing: {len(transformations)}")
-            for original, new in sorted(transformations.items())[:5]:  # Show first 5
-                print(f"    {original} → {new}")
-
-        if usdt_count == total_lines and total_lines > 0:
-            print("  ✅ All symbols have -USDT suffix!")
-            return True
-        else:
-            print(f"  ⚠️  Only {usdt_count}/{total_lines} symbols have -USDT suffix")
-            return False
-
-    except Exception as e:
-        print(f"❌ Error during verification: {e}")
-        return False
-
-# Merge all crypto daily price JSON files, write one line per file to crypto_merged.jsonl
-current_dir = os.path.dirname(__file__)
-assert (Path(current_dir) / "coin").exists(), "coin/ directory not found!"
-pattern = os.path.join(current_dir, "coin", "daily_prices_*.json")
-files = sorted(glob.glob(pattern))
-assert files, "No crypto daily price files found to merge!"
-output_file = os.path.join(current_dir, "crypto_merged.jsonl")
-
-print(f"Found {len(files)} crypto files to merge")
-print(f"Output file: {output_file}")
-
-# Create backup of existing file if it exists
-backup_crypto_data()
-
-with open(output_file, "w", encoding="utf-8") as fout:
     for fp in files:
-        basename = os.path.basename(fp)
-        print(f"Processing: {basename}")
+        basename = Path(fp).name
 
         # Only process files that contain our crypto symbols
         if not any(symbol in basename for symbol in crypto_symbols_usdt):
-            print(f"  Skipping: {basename} (not in crypto symbols list)")
+            skipped += 1
+            print(f"  Skipping: {basename}")
             continue
 
         with open(fp, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # Rename fields: "1. open" -> "1. buy price"；"4. close" -> "4. sell price"
-        # For the latest date, only keep "1. buy price"
-        # Also fix crypto symbols by adding -USDT suffix
         try:
-            # Find all keys starting with "Time Series"
+            # Find Time Series key
             series = None
             for key, value in data.items():
                 if key.startswith("Time Series"):
@@ -158,51 +90,86 @@ with open(output_file, "w", encoding="utf-8") as fout:
                     break
 
             if isinstance(series, dict) and series:
-                # First rename fields for all dates
-                for d, bar in list(series.items()):
+                # Get symbol from Meta Data
+                meta = data.get("Meta Data", {})
+                symbol = meta.get("2. Symbol", basename)
+
+                # Fix crypto symbol by adding -USDT suffix
+                if symbol and not symbol.endswith("-USDT"):
+                    new_symbol = f"{symbol}-USDT"
+                    symbol = new_symbol
+
+                # Process each timestamp
+                for timestamp, bar in series.items():
                     if not isinstance(bar, dict):
                         continue
-                    if "1. open" in bar:
-                        bar["1. buy price"] = bar.pop("1. open")
-                    if "4. close" in bar:
-                        bar["4. sell price"] = bar.pop("4. close")
 
-                # Then process latest date, keep only buy price
-                latest_date = max(series.keys())
-                latest_bar = series.get(latest_date, {})
-                if isinstance(latest_bar, dict):
-                    buy_val = latest_bar.get("1. buy price")
-                    series[latest_date] = {"1. buy price": buy_val} if buy_val is not None else {}
+                    # Parse prices
+                    buy_price = None
+                    sell_price = None
+                    high_price = None
+                    low_price = None
+                    volume = None
 
-                # Update Meta Data description and fix symbol
-                meta = data.get("Meta Data", {})
-                if isinstance(meta, dict):
-                    meta["1. Information"] = "Daily Prices (buy price, high, low, sell price) and Volumes"
+                    for k, v in bar.items():
+                        k_lower = k.lower()
+                        if "buy" in k_lower or k == "1. open":
+                            try:
+                                buy_price = float(v)
+                            except (ValueError, TypeError):
+                                pass
+                        elif "sell" in k_lower or k == "4. close":
+                            try:
+                                sell_price = float(v)
+                            except (ValueError, TypeError):
+                                pass
+                        elif "high" in k_lower:
+                            try:
+                                high_price = float(v)
+                            except (ValueError, TypeError):
+                                pass
+                        elif "low" in k_lower:
+                            try:
+                                low_price = float(v)
+                            except (ValueError, TypeError):
+                                pass
+                        elif "volume" in k_lower:
+                            try:
+                                volume = float(v)
+                            except (ValueError, TypeError):
+                                pass
 
-                    # Fix crypto symbol by adding -USDT suffix
-                    original_symbol = meta.get("2. Symbol", "")
-                    if original_symbol and not original_symbol.endswith("-USDT"):
-                        new_symbol = f"{original_symbol}-USDT"
-                        meta["2. Symbol"] = new_symbol
+                    # Add to database
+                    try:
+                        add_price(
+                            symbol=symbol,
+                            timestamp=timestamp,
+                            market="crypto",
+                            buy_price=buy_price,
+                            sell_price=sell_price,
+                            high_price=high_price,
+                            low_price=low_price,
+                            volume=volume,
+                            raw_data=bar
+                        )
+                        count += 1
+                    except Exception as e:
+                        print(f"  Error adding {symbol} at {timestamp}: {e}")
 
-                        # Also update the information field
-                        if "1. Information" in meta and original_symbol in meta["1. Information"]:
-                            meta["1. Information"] = meta["1. Information"].replace(original_symbol, new_symbol)
-
-                        print(f"  Fixed symbol: {original_symbol} → {new_symbol}")
+                processed += 1
+                print(f"  Processed: {basename}")
 
         except Exception as e:
             print(f"  Error processing {basename}: {e}")
-            # If structure error, write as-is
-            pass
+            continue
 
-        # Write to merged file
-        fout.write(json.dumps(data, ensure_ascii=False) + "\n")
-        print(f"  Added to merged file")
+    print(f"\nDone: Added {count} price records to database")
+    print(f"Statistics: {processed} files processed, {skipped} files skipped")
 
-print(f"\nCrypto merge complete! Output saved to: {output_file}")
-processed_count = len([f for f in files if any(symbol in os.path.basename(f) for symbol in crypto_symbols_usdt)])
-print(f"Total symbols processed: {processed_count}")
 
-# Verify that symbol fixes were applied correctly
-verify_symbol_fixes()
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Crypto Data Merger to Database")
+    print("=" * 60)
+    merge_to_db()
+    print("=" * 60)

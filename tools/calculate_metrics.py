@@ -15,14 +15,45 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 import argparse
+import sys
+
+# Add project root to path
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
 
 
 def load_position_data(position_file):
-    """Load position data from JSONL file."""
+    """Load position data from JSONL file (legacy)."""
     positions = []
     with open(position_file, 'r') as f:
         for line in f:
             positions.append(json.loads(line))
+    return positions
+
+
+def load_position_from_db(signature, market="agent_data"):
+    """Load position data from database."""
+    from tools.trading_db import get_position_history, get_db_path, init_db
+
+    db_path = get_db_path(market)
+    init_db(db_path)
+
+    records = get_position_history(signature, db_path)
+
+    # Convert to same format as JSONL
+    positions = []
+    for r in records:
+        positions.append({
+            "date": r.get("date"),
+            "id": r.get("id"),
+            "this_action": {
+                "action": r.get("action_type", ""),
+                "symbol": r.get("symbol", ""),
+                "amount": r.get("amount", 0)
+            },
+            "positions": r.get("positions", {})
+        })
+
     return positions
 
 
@@ -295,20 +326,40 @@ def detect_market_type(positions):
 
 def main():
     parser = argparse.ArgumentParser(description='Calculate trading performance metrics')
-    parser.add_argument('position_file', help='Path to position.jsonl file')
+    parser.add_argument('position_file', nargs='?', help='Path to position.jsonl file (optional if using --from-db)')
     parser.add_argument('--data-dir', default='data', help='Directory containing price data')
     parser.add_argument('--is-crypto', action='store_true', help='Force crypto mode')
     parser.add_argument('--is-astock', action='store_true', help='Force A-stock mode')
     parser.add_argument('--is-hourly', action='store_true', help='Use hourly trading periods (affects annualization)')
     parser.add_argument('--verbose', action='store_true', help='Show all warning messages')
     parser.add_argument('--risk-free-rate', type=float, default=0.0, help='Annual risk-free rate (default: 0.0)')
+    parser.add_argument('--from-db', action='store_true', help='Load position data from database instead of JSONL file')
+    parser.add_argument('--signature', help='Model signature (required when using --from-db)')
 
     args = parser.parse_args()
 
     # Load position data
-    print(f"Loading position data from {args.position_file}...")
-    positions = load_position_data(args.position_file)
-    print(f"Loaded {len(positions)} position entries")
+    if args.from_db:
+        if not args.signature:
+            print("ERROR: --signature is required when using --from-db")
+            return
+        print(f"Loading position data from database for signature: {args.signature}...")
+        # Determine market from signature or other hints
+        if args.is_astock:
+            market = "astock"
+        elif args.is_crypto:
+            market = "crypto"
+        else:
+            market = "agent_data"
+        positions = load_position_from_db(args.signature, market)
+        print(f"Loaded {len(positions)} position entries from database")
+    else:
+        if not args.position_file:
+            print("ERROR: position_file is required unless using --from-db")
+            return
+        print(f"Loading position data from {args.position_file}...")
+        positions = load_position_data(args.position_file)
+        print(f"Loaded {len(positions)} position entries")
 
     # Detect market type
     is_crypto = args.is_crypto or detect_market_type(positions) == 'crypto'
@@ -379,8 +430,22 @@ def main():
     print(f"  Average Loss:              {metrics['Average Loss']*100:>8.2f}%")
     print("="*60)
 
+    # Determine output directory
+    if args.from_db:
+        # When using database, use data directory based on market type
+        if args.is_astock:
+            output_dir = Path("data/A_stock")
+        elif args.is_crypto:
+            output_dir = Path("data/crypto")
+        else:
+            output_dir = Path("data/agent_data")
+        output_dir = output_dir / args.signature
+    else:
+        output_dir = Path(args.position_file).parent
+
     # Save detailed results
-    output_file = Path(args.position_file).parent / 'performance_metrics.json'
+    output_file = output_dir / 'performance_metrics.json'
+    output_dir.mkdir(parents=True, exist_ok=True)
     with open(output_file, 'w') as f:
         # Convert to serializable format
         output_metrics = {k: float(v) if isinstance(v, (np.integer, np.floating)) else v
@@ -389,7 +454,7 @@ def main():
     print(f"\nDetailed metrics saved to {output_file}")
 
     # Save portfolio values
-    portfolio_csv = Path(args.position_file).parent / 'portfolio_values.csv'
+    portfolio_csv = output_dir / 'portfolio_values.csv'
     portfolio_df.to_csv(portfolio_csv, index=False)
     print(f"Portfolio values saved to {portfolio_csv}")
 

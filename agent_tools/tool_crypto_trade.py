@@ -13,10 +13,14 @@ sys.path.insert(0, project_root)
 import json
 
 from tools.general_tools import get_config_value, write_config_value
-from tools.price_tools import (get_latest_position, get_open_prices,
+from tools.price_tools import (get_open_prices,
                                get_yesterday_date,
                                get_yesterday_open_and_close_price,
                                get_yesterday_profit)
+from tools.trading_db import (
+    get_latest_position, append_position, get_total_bought_today,
+    get_db_path, init_db
+)
 
 mcp = FastMCP("CryptoTradeTools")
 
@@ -51,7 +55,7 @@ def buy_crypto(symbol: str, amount: float) -> Dict[str, Any]:
     2. Get cryptocurrency opening price for the day
     3. Validate buy conditions (sufficient cash)
     4. Update position (increase crypto quantity, decrease cash)
-    5. Record transaction to position.jsonl file
+    5. Record transaction to database
 
     Args:
         symbol: Cryptocurrency symbol, such as "BTC-USDT", "ETH-USDT", etc.
@@ -103,12 +107,14 @@ def buy_crypto(symbol: str, amount: float) -> Dict[str, Any]:
     # get_latest_position returns two values: position dictionary and current maximum operation ID
     # This ID is used to ensure each operation has a unique identifier
     # Acquire lock for atomic read-modify-write on positions
+    db_path = get_db_path("crypto")
+    init_db(db_path)
     with _position_lock(signature):
         try:
-            current_position, current_action_id = get_latest_position(today_date, signature)
+            current_position, current_action_id = get_latest_position(signature, db_path, "crypto")
         except Exception as e:
             print(e)
-            print(today_date, signature)
+            print(f"signature={signature}, db_path={db_path}")
             return {"error": f"Failed to load latest position: {e}", "symbol": symbol, "date": today_date}
         # Step 3: Get cryptocurrency opening price for the day
         # Use get_open_prices function to get the opening price of specified crypto for the day
@@ -151,30 +157,24 @@ def buy_crypto(symbol: str, amount: float) -> Dict[str, Any]:
             # Increase crypto position quantity with 4 decimal precision
             new_position[symbol] = round(new_position[symbol] + amount, 4)
 
-            # Step 6: Record transaction to position.jsonl file
-            # Build file path: {project_root}/data/{log_path}/{signature}/position/position.jsonl
-            # Use append mode ("a") to write new transaction record
-            # Each operation ID increments by 1, ensuring uniqueness of operation sequence
-            log_path = get_config_value("LOG_PATH", "./data/agent_data")
-            if log_path.startswith("./data/"):
-                log_path = log_path[7:]  # Remove "./data/" prefix
-            position_file_path = os.path.join(project_root, "data", log_path, signature, "position", "position.jsonl")
-            with open(position_file_path, "a") as f:
-                # Write JSON format transaction record, containing date, operation ID, transaction details and updated position
-                print(
-                    f"Writing to position.jsonl: {json.dumps({'date': today_date, 'id': current_action_id + 1, 'this_action':{'action':'buy_crypto','symbol':symbol,'amount':amount},'positions': new_position})}"
-                )
-                f.write(
-                    json.dumps(
-                        {
-                            "date": today_date,
-                            "id": current_action_id + 1,
-                            "this_action": {"action": "buy_crypto", "symbol": symbol, "amount": amount},
-                            "positions": new_position,
-                        }
-                    )
-                    + "\n"
-                )
+            # Step 6: Record transaction to database
+            # Initialize database and append position
+            db_path = get_db_path("crypto")
+            init_db(db_path)
+
+            append_position(
+                signature=signature,
+                date=today_date,
+                action_type="buy_crypto",
+                symbol=symbol,
+                amount=amount,
+                positions=new_position,
+                db_path=db_path,
+                market="crypto"
+            )
+
+            print(f"Writing to database: {signature}, {today_date}, buy {amount} {symbol}")
+
             # Step 7: Return updated position
             write_config_value("IF_TRADE", True)
             print("IF_TRADE", get_config_value("IF_TRADE"))
@@ -192,7 +192,7 @@ def sell_crypto(symbol: str, amount: float) -> Dict[str, Any]:
     2. Get cryptocurrency opening price for the day
     3. Validate sell conditions (position exists, sufficient quantity)
     4. Update position (decrease crypto quantity, increase cash)
-    5. Record transaction to position.jsonl file
+    5. Record transaction to database
 
     Args:
         symbol: Cryptocurrency symbol, such as "BTC-USDT", "ETH-USDT", etc.
@@ -243,12 +243,14 @@ def sell_crypto(symbol: str, amount: float) -> Dict[str, Any]:
     # Step 2: Get current latest position and operation ID
     # get_latest_position returns two values: position dictionary and current maximum operation ID
     # This ID is used to ensure each operation has a unique identifier
+    db_path = get_db_path("crypto")
+    init_db(db_path)
     with _position_lock(signature):
         try:
-            current_position, current_action_id = get_latest_position(today_date, signature)
+            current_position, current_action_id = get_latest_position(signature, db_path, "crypto")
         except Exception as e:
             print(e)
-            print(today_date, signature)
+            print(f"signature={signature}, db_path={db_path}")
             return {"error": f"Failed to load latest position: {e}",
                     "symbol": symbol,
                     "date": today_date}
@@ -295,30 +297,23 @@ def sell_crypto(symbol: str, amount: float) -> Dict[str, Any]:
         # Use get method to ensure CASH field exists, default to 0 if not present
         new_position["CASH"] = round(new_position.get("CASH", 0) + this_symbol_price * amount, 4)
 
-        # Step 6: Record transaction to position.jsonl file
-        # Build file path: {project_root}/data/{log_path}/{signature}/position/position.jsonl
-        # Use append mode ("a") to write new transaction record
-        # Each operation ID increments by 1, ensuring uniqueness of operation sequence
-        log_path = get_config_value("LOG_PATH", "./data/agent_data")
-        if log_path.startswith("./data/"):
-            log_path = log_path[7:]  # Remove "./data/" prefix
-        position_file_path = os.path.join(project_root, "data", log_path, signature, "position", "position.jsonl")
-        with open(position_file_path, "a") as f:
-            # Write JSON format transaction record, containing date, operation ID and updated position
-            print(
-                f"Writing to position.jsonl: {json.dumps({'date': today_date, 'id': current_action_id + 1, 'this_action':{'action':'sell_crypto','symbol':symbol,'amount':amount},'positions': new_position})}"
-            )
-            f.write(
-                json.dumps(
-                    {
-                        "date": today_date,
-                        "id": current_action_id + 1,
-                        "this_action": {"action": "sell_crypto", "symbol": symbol, "amount": amount},
-                        "positions": new_position,
-                    }
-                )
-                + "\n"
-            )
+        # Step 6: Record transaction to database
+        # Initialize database and append position
+        db_path = get_db_path("crypto")
+        init_db(db_path)
+
+        append_position(
+            signature=signature,
+            date=today_date,
+            action_type="sell_crypto",
+            symbol=symbol,
+            amount=amount,
+            positions=new_position,
+            db_path=db_path,
+            market="crypto"
+        )
+
+        print(f"Writing to database: {signature}, {today_date}, sell {amount} {symbol}")
 
         # Step 7: Return updated position
         write_config_value("IF_TRADE", True)

@@ -13,36 +13,44 @@ Output:
 """
 
 import os
+import sys
 import json
 import hashlib
 from pathlib import Path
 from datetime import datetime
 import yaml
 
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from tools.trading_db import get_position_history, get_db_path, init_db
+
 
 def get_data_version_hash(market_config):
     """
-    Generate a version hash based on position files' modification times.
+    Generate a version hash based on database data.
     This allows the frontend to detect when data has changed.
     """
     hash_obj = hashlib.md5()
 
-    # Get agent data directory
+    # Determine market type
     data_dir = market_config.get('data_dir', 'agent_data')
-    base_path = Path(__file__).parent.parent / 'docs' / 'data' / data_dir
+    if 'astock' in data_dir.lower():
+        db_market = 'astock'
+    elif 'crypto' in data_dir.lower():
+        db_market = 'crypto'
+    else:
+        db_market = 'agent_data'
 
-    # Collect all position file timestamps
-    position_files = sorted(base_path.glob('*/position/position.jsonl'))
+    db_path = get_db_path(db_market)
 
-    timestamps = []
-    for position_file in position_files:
-        if position_file.exists():
-            mtime = position_file.stat().st_mtime
-            timestamps.append(f"{position_file.name}:{mtime}")
+    if not db_path.exists():
+        return "nodata"
 
-    # Create hash from all timestamps
-    hash_input = '|'.join(timestamps)
-    hash_obj.update(hash_input.encode('utf-8'))
+    # Use database file modification time
+    mtime = db_path.stat().st_mtime
+    hash_obj.update(f"{db_path}:{mtime}".encode('utf-8'))
 
     return hash_obj.hexdigest()[:12]  # Short hash
 
@@ -55,7 +63,48 @@ def load_config():
 
 
 def load_position_data(agent_folder, market_config):
-    """Load position data for a specific agent."""
+    """Load position data for a specific agent from database."""
+    data_dir = market_config.get('data_dir', 'agent_data')
+
+    # Determine market type
+    if 'astock' in data_dir.lower():
+        db_market = 'astock'
+    elif 'crypto' in data_dir.lower():
+        db_market = 'crypto'
+    else:
+        db_market = 'agent_data'
+
+    db_path = get_db_path(db_market)
+
+    if not db_path.exists():
+        # Fallback to legacy JSONL file
+        return load_position_data_legacy(agent_folder, market_config)
+
+    # Initialize database
+    init_db(db_path)
+
+    # Get position history from database
+    records = get_position_history(agent_folder, db_path)
+
+    # Convert to same format as JSONL
+    positions = []
+    for r in records:
+        positions.append({
+            "date": r.get("date"),
+            "id": r.get("id"),
+            "this_action": {
+                "action": r.get("action_type", ""),
+                "symbol": r.get("symbol", ""),
+                "amount": r.get("amount", 0)
+            },
+            "positions": r.get("positions", {})
+        })
+
+    return positions
+
+
+def load_position_data_legacy(agent_folder, market_config):
+    """Load position data for a specific agent from JSONL file (legacy)."""
     data_dir = market_config.get('data_dir', 'agent_data')
     position_file = Path(__file__).parent.parent / 'docs' / 'data' / data_dir / agent_folder / 'position' / 'position.jsonl'
 

@@ -22,6 +22,9 @@ sys.path.insert(0, project_root)
 
 from tools.general_tools import extract_conversation, extract_tool_messages, get_config_value, write_config_value
 from tools.price_tools import add_no_trade_record
+from tools.trading_db import (
+    check_position_exists, get_latest_position, get_db_path, init_db
+)
 from prompts.agent_prompt import get_agent_system_prompt, STOP_SIGNAL
 
 # Load environment variables
@@ -177,32 +180,18 @@ class BaseAgent_Hour(BaseAgent):
         
         if not all_timestamps:
             return []
-        # Determine min_datetime based on init_date and last processed date in position file
+
+        # Determine min_datetime based on init_dt and last processed date in database
         min_datetime = init_dt
-        
+
         last_processed_dt = None
-        if os.path.exists(self.position_file):
-            max_date = None
-            with open(self.position_file, "r") as f:
-                for line in f:
-                    doc = json.loads(line)
-                    current_date = doc['date']
-                    if max_date is None:
-                        max_date = current_date
-                    else:
-                        if ' ' in current_date:
-                            current_date_obj = datetime.strptime(current_date, "%Y-%m-%d %H:%M:%S")
-                        else:
-                            current_date_obj = datetime.strptime(current_date, "%Y-%m-%d")
-                        
-                        if ' ' in max_date:
-                            max_date_obj = datetime.strptime(max_date, "%Y-%m-%d %H:%M:%S")
-                        else:
-                            max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
-                        
-                        if current_date_obj > max_date_obj:
-                            max_date = current_date
-            
+        REGISTER = False
+
+        # Check if position exists in database
+        if check_position_exists(self.signature, self._db_path):
+            # Get latest position from database
+            latest_pos, _ = get_latest_position(self.signature, self._db_path, self._db_market)
+            max_date = latest_pos.get("date", None)
             if max_date:
                 if has_time:
                     last_processed_dt = datetime.strptime(max_date, "%Y-%m-%d %H:%M:%S")
@@ -210,7 +199,7 @@ class BaseAgent_Hour(BaseAgent):
                     last_processed_dt = datetime.strptime(max_date, "%Y-%m-%d")
             REGISTER = False
         else:
-            # ensure agent registration if no position file yet
+            # ensure agent registration if no position yet
             self.register_agent()
             REGISTER = True
         # Take the larger lower bound between init_dt and last_processed_dt

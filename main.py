@@ -209,26 +209,37 @@ async def main(config_path=None):
         print(f"🤖 Processing model: {model_name}")
         print(f"📝 Signature: {signature}")
         print(f"🔧 BaseModel: {basemodel}")
-            
+
         # Initialize runtime configuration
         # Use the shared config file from RUNTIME_ENV_PATH in .env
-        
+
         project_root = _Path(__file__).resolve().parent
-        
+
         # Get log path configuration
         log_path = log_config.get("log_path", "./data/agent_data")
-        
-        # Check position file to determine if this is a fresh start
-        position_file = project_root / log_path / signature / "position" / "position.jsonl"
-        
-        # If position file doesn't exist, reset config to start from INIT_DATE
-        if not position_file.exists():
+
+        # Determine market for database
+        if "astock" in str(log_path).lower():
+            db_market = "astock"
+        elif "crypto" in str(log_path).lower():
+            db_market = "crypto"
+        else:
+            db_market = "agent_data"
+
+        # Check database to determine if this is a fresh start
+        from tools.trading_db import check_position_exists, get_db_path, init_db
+        db_path = get_db_path(db_market)
+        init_db(db_path)
+        position_exists = check_position_exists(signature, db_path)
+
+        # If position doesn't exist in database, reset config to start from INIT_DATE
+        if not position_exists:
             # Clear the shared config file for fresh start
             from tools.general_tools import _resolve_runtime_env_path
             runtime_env_path = _resolve_runtime_env_path()
             if os.path.exists(runtime_env_path):
                 os.remove(runtime_env_path)
-                print(f"🔄 Position file not found, cleared config for fresh start from {INIT_DATE}")
+                print(f"🔄 Position not found in database, cleared config for fresh start from {INIT_DATE}")
         
         # Write config values to shared config file (from .env RUNTIME_ENV_PATH)
         write_config_value("SIGNATURE", signature)

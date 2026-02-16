@@ -13,10 +13,14 @@ sys.path.insert(0, project_root)
 import json
 
 from tools.general_tools import get_config_value, write_config_value
-from tools.price_tools import (get_latest_position, get_open_prices,
+from tools.price_tools import (get_open_prices,
                                get_yesterday_date,
                                get_yesterday_open_and_close_price,
                                get_yesterday_profit)
+from tools.trading_db import (
+    get_latest_position, append_position, get_total_bought_today,
+    get_db_path, init_db
+)
 
 mcp = FastMCP("TradeTools")
 
@@ -127,16 +131,27 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
             "suggestion": f"Please use {(amount // 100) * 100} or {((amount // 100) + 1) * 100} shares instead.",
         }
 
+    # Determine market for database (before using db_path, db_market)
+    log_path = get_config_value("LOG_PATH", "./data/agent_data")
+    if "astock" in str(log_path).lower():
+        db_market = "astock"
+    elif "crypto" in str(log_path).lower():
+        db_market = "crypto"
+    else:
+        db_market = "agent_data"
+    db_path = get_db_path(db_market)
+    init_db(db_path)
+
     # Step 2: Get current latest position and operation ID
     # get_latest_position returns two values: position dictionary and current maximum operation ID
     # This ID is used to ensure each operation has a unique identifier
     # Acquire lock for atomic read-modify-write on positions
     with _position_lock(signature):
         try:
-            current_position, current_action_id = get_latest_position(today_date, signature)
+            current_position, current_action_id = get_latest_position(signature, db_path, db_market)
         except Exception as e:
             print(e)
-            print(today_date, signature)
+            print(f"signature={signature}, db_path={db_path}, db_market={db_market}")
             return {"error": f"Failed to load latest position: {e}", "symbol": symbol, "date": today_date}
     # Step 3: Get stock opening price for the day
     # Use get_open_prices function to get the opening price of specified stock for the day
@@ -195,30 +210,19 @@ def buy(symbol: str, amount: int) -> Dict[str, Any]:
         # Increase stock position quantity
         new_position[symbol] = new_position.get(symbol, 0) + amount
 
-        # Step 6: Record transaction to position.jsonl file
-        # Build file path: {project_root}/data/{log_path}/{signature}/position/position.jsonl
-        # Use append mode ("a") to write new transaction record
-        # Each operation ID increments by 1, ensuring uniqueness of operation sequence
-        log_path = get_config_value("LOG_PATH", "./data/agent_data")
-        if log_path.startswith("./data/"):
-            log_path = log_path[7:]  # Remove "./data/" prefix
-        position_file_path = os.path.join(project_root, "data", log_path, signature, "position", "position.jsonl")
-        with open(position_file_path, "a") as f:
-            # Write JSON format transaction record, containing date, operation ID, transaction details and updated position
-            print(
-                f"Writing to position.jsonl: {json.dumps({'date': today_date, 'id': current_action_id + 1, 'this_action':{'action':'buy','symbol':symbol,'amount':amount},'positions': new_position})}"
-            )
-            f.write(
-                json.dumps(
-                    {
-                        "date": today_date,
-                        "id": current_action_id + 1,
-                        "this_action": {"action": "buy", "symbol": symbol, "amount": amount},
-                        "positions": new_position,
-                    }
-                )
-                + "\n"
-            )
+        append_position(
+            signature=signature,
+            date=today_date,
+            action_type="buy",
+            symbol=symbol,
+            amount=amount,
+            positions=new_position,
+            db_path=db_path,
+            market=db_market
+        )
+
+        print(f"Writing to database: {signature}, {today_date}, buy {amount} {symbol}")
+
         # Step 7: Return updated position
         write_config_value("IF_TRADE", True)
         print("IF_TRADE", get_config_value("IF_TRADE"))
@@ -238,28 +242,21 @@ def _get_today_buy_amount(symbol: str, today_date: str, signature: str) -> int:
         Total shares bought today
     """
     log_path = get_config_value("LOG_PATH", "./data/agent_data")
-    if log_path.startswith("./data/"):
-        log_path = log_path[7:]  # Remove "./data/" prefix
-    position_file_path = os.path.join(project_root, "data", log_path, signature, "position", "position.jsonl")
 
-    if not os.path.exists(position_file_path):
+    # Determine market for database
+    if "astock" in str(log_path).lower():
+        db_market = "astock"
+    elif "crypto" in str(log_path).lower():
+        db_market = "crypto"
+    else:
+        db_market = "agent_data"
+
+    db_path = get_db_path(db_market)
+
+    if not db_path.exists():
         return 0
 
-    total_bought_today = 0
-    with open(position_file_path, "r") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-                if record.get("date") == today_date:
-                    this_action = record.get("this_action", {})
-                    if this_action.get("action") == "buy" and this_action.get("symbol") == symbol:
-                        total_bought_today += this_action.get("amount", 0)
-            except Exception:
-                continue
-
-    return total_bought_today
+    return get_total_bought_today(signature, today_date, symbol, db_path)
 
 
 @mcp.tool()
@@ -337,10 +334,21 @@ def sell(symbol: str, amount: int) -> Dict[str, Any]:
             "suggestion": f"Please use {(amount // 100) * 100} or {((amount // 100) + 1) * 100} shares instead.",
         }
 
+    # Determine market for database (before using db_path, db_market)
+    log_path = get_config_value("LOG_PATH", "./data/agent_data")
+    if "astock" in str(log_path).lower():
+        db_market = "astock"
+    elif "crypto" in str(log_path).lower():
+        db_market = "crypto"
+    else:
+        db_market = "agent_data"
+    db_path = get_db_path(db_market)
+    init_db(db_path)
+
     # Step 2: Get current latest position and operation ID
     # get_latest_position returns two values: position dictionary and current maximum operation ID
     # This ID is used to ensure each operation has a unique identifier
-    current_position, current_action_id = get_latest_position(today_date, signature)
+    current_position, current_action_id = get_latest_position(signature, db_path, db_market)
 
     # Step 3: Get stock opening price for the day
     # Use get_open_prices function to get the opening price of specified stock for the day
@@ -402,30 +410,18 @@ def sell(symbol: str, amount: int) -> Dict[str, Any]:
     # Use get method to ensure CASH field exists, default to 0 if not present
     new_position["CASH"] = new_position.get("CASH", 0) + this_symbol_price * amount
 
-    # Step 6: Record transaction to position.jsonl file
-    # Build file path: {project_root}/data/{log_path}/{signature}/position/position.jsonl
-    # Use append mode ("a") to write new transaction record
-    # Each operation ID increments by 1, ensuring uniqueness of operation sequence
-    log_path = get_config_value("LOG_PATH", "./data/agent_data")
-    if log_path.startswith("./data/"):
-        log_path = log_path[7:]  # Remove "./data/" prefix
-    position_file_path = os.path.join(project_root, "data", log_path, signature, "position", "position.jsonl")
-    with open(position_file_path, "a") as f:
-        # Write JSON format transaction record, containing date, operation ID and updated position
-        print(
-            f"Writing to position.jsonl: {json.dumps({'date': today_date, 'id': current_action_id + 1, 'this_action':{'action':'sell','symbol':symbol,'amount':amount},'positions': new_position})}"
-        )
-        f.write(
-            json.dumps(
-                {
-                    "date": today_date,
-                    "id": current_action_id + 1,
-                    "this_action": {"action": "sell", "symbol": symbol, "amount": amount},
-                    "positions": new_position,
-                }
-            )
-            + "\n"
-        )
+    append_position(
+        signature=signature,
+        date=today_date,
+        action_type="sell",
+        symbol=symbol,
+        amount=amount,
+        positions=new_position,
+        db_path=db_path,
+        market=db_market
+    )
+
+    print(f"Writing to database: {signature}, {today_date}, sell {amount} {symbol}")
 
     # Step 7: Return updated position
     write_config_value("IF_TRADE", True)

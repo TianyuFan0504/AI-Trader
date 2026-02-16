@@ -1,36 +1,47 @@
+"""
+Convert A-share CSV data to SQLite database.
+
+This script reads A-share daily price CSV files and saves them to the prices database.
+
+Usage:
+    python data/A_stock/merge_jsonl_tushare.py
+"""
+
 import json
 import os
+import sys
 from pathlib import Path
-from typing import Any, Dict
 
 import pandas as pd
 
+# Add project root to path
+project_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(project_root))
 
-def convert_a_stock_to_jsonl(
+from tools.trading_db import init_db, add_price, get_db_path
+
+
+def convert_a_stock_to_db(
     csv_path: str = "A_stock_data/daily_prices_sse_50.csv",
-    output_path: str = "merged.jsonl",
     stock_name_csv: str = "A_stock_data/sse_50_weight.csv",
 ) -> None:
-    """Convert A-share CSV data to JSONL format compatible with the trading system.
-
-    The output format matches the Alpha Vantage format used for NASDAQ data:
-    - Each line is a JSON object for one stock
-    - Contains "Meta Data" and "Time Series (Daily)" fields
-    - Uses "1. buy price" (open), "2. high", "3. low", "4. sell price" (close), "5. volume"
-    - Includes stock name from sse_50_weight.csv for better AI understanding
+    """Convert A-share CSV data to database.
 
     Args:
-        csv_path: Path to the A-share daily price CSV file (default: A_stock_data/daily_prices_sse_50.csv)
-        output_path: Path to output JSONL file (default: A_stock_data/merged.jsonl)
-        stock_name_csv: Path to SSE 50 weight CSV containing stock names (default: A_stock_data/sse_50_weight.csv)
+        csv_path: Path to the A-share daily price CSV file
+        stock_name_csv: Path to SSE 50 weight CSV containing stock names
     """
     csv_path = Path(csv_path)
-    output_path = Path(output_path)
     stock_name_csv = Path(stock_name_csv)
 
     if not csv_path.exists():
         print(f"Error: CSV file not found: {csv_path}")
         return
+
+    # Initialize database
+    db_path = get_db_path("prices")
+    init_db(db_path)
+    print(f"Database: {db_path}")
 
     print(f"Reading CSV file: {csv_path}")
 
@@ -51,72 +62,85 @@ def convert_a_stock_to_jsonl(
     print(f"Total records: {len(df)}")
     print(f"Columns: {df.columns.tolist()}")
 
-    # Ensure output directory exists
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
     # Group by stock symbol
     grouped = df.groupby("ts_code")
 
     print(f"Processing {len(grouped)} stocks...")
 
-    with open(output_path, "w", encoding="utf-8") as fout:
-        for ts_code, group_df in grouped:
-            # Sort by date ascending
-            group_df = group_df.sort_values("trade_date", ascending=True)
+    count = 0
+    for ts_code, group_df in grouped:
+        # Sort by date ascending
+        group_df = group_df.sort_values("trade_date", ascending=True)
 
-            # Get latest date for Meta Data
-            latest_date = str(group_df["trade_date"].max())
-            latest_date_formatted = f"{latest_date[:4]}-{latest_date[4:6]}-{latest_date[6:]}"
+        for idx, row in group_df.iterrows():
+            date_str = str(row["trade_date"])
+            date_formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
 
-            # Build Time Series (Daily) data
-            time_series = {}
+            # Parse prices
+            buy_price = None
+            sell_price = None
+            high_price = None
+            low_price = None
+            volume = None
 
-            for idx, row in group_df.iterrows():
-                date_str = str(row["trade_date"])
-                date_formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+            try:
+                if pd.notna(row.get("open")):
+                    buy_price = float(row["open"])
+            except (ValueError, TypeError):
+                pass
 
-                # For the latest date, only include buy price (to prevent future information leakage)
-                if date_str == latest_date:
-                    time_series[date_formatted] = {"1. buy price": str(row["open"])}
-                else:
-                    time_series[date_formatted] = {
-                        "1. buy price": str(row["open"]),
-                        "2. high": str(row["high"]),
-                        "3. low": str(row["low"]),
-                        "4. sell price": str(row["close"]),
-                        "5. volume": (
-                            str(int(row["vol"] * 100)) if pd.notna(row["vol"]) else "0"
-                        ),  # Convert to shares (vol is in 手, 1手=100股)
-                    }
+            try:
+                if pd.notna(row.get("close")):
+                    sell_price = float(row["close"])
+            except (ValueError, TypeError):
+                pass
 
-            # Get stock name from mapping
-            stock_name = stock_name_map.get(ts_code, "Unknown")
+            try:
+                if pd.notna(row.get("high")):
+                    high_price = float(row["high"])
+            except (ValueError, TypeError):
+                pass
 
-            # Build complete JSON object
-            json_obj = {
-                "Meta Data": {
-                    "1. Information": "Daily Prices (buy price, high, low, sell price) and Volumes",
-                    "2. Symbol": ts_code,
-                    "2.1. Name": stock_name,
-                    "3. Last Refreshed": latest_date_formatted,
-                    "4. Output Size": "Full Size",
-                    "5. Time Zone": "Asia/Shanghai",
-                },
-                "Time Series (Daily)": time_series,
-            }
+            try:
+                if pd.notna(row.get("low")):
+                    low_price = float(row["low"])
+            except (ValueError, TypeError):
+                pass
 
-            # Write to JSONL file
-            fout.write(json.dumps(json_obj, ensure_ascii=False) + "\n")
+            try:
+                if pd.notna(row.get("vol")):
+                    volume = float(row["vol"] * 100)  # Convert 手 to shares
+            except (ValueError, TypeError):
+                pass
 
-    print(f"✅ Data conversion completed: {output_path}")
-    print(f"✅ Total stocks: {len(grouped)}")
-    print(f"✅ File size: {output_path.stat().st_size / 1024 / 1024:.2f} MB")
+            # Add to database
+            try:
+                add_price(
+                    symbol=ts_code,
+                    timestamp=date_formatted,
+                    market="astock",
+                    buy_price=buy_price,
+                    sell_price=sell_price,
+                    high_price=high_price,
+                    low_price=low_price,
+                    volume=volume
+                )
+                count += 1
+            except Exception as e:
+                print(f"  Error adding {ts_code} at {date_formatted}: {e}")
+
+    print(f"Done: Added {count} price records to database")
 
 
 if __name__ == "__main__":
-    # Convert A-share data to JSONL format
     print("=" * 60)
-    print("A-Share Data Converter")
+    print("A-Share Data Converter to Database")
     print("=" * 60)
-    convert_a_stock_to_jsonl()
+
+    current_dir = Path(__file__).parent
+    csv_path = current_dir / "A_stock_data" / "daily_prices_sse_50.csv"
+    stock_name_csv = current_dir / "A_stock_data" / "sse_50_weight.csv"
+
+    convert_a_stock_to_db(str(csv_path), str(stock_name_csv))
+
     print("=" * 60)
