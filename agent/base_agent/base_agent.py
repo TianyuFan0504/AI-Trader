@@ -1,102 +1,28 @@
 """
-BaseAgent class - Base class for trading agents
-Encapsulates core functionality including MCP tool management, AI agent creation, and trading execution
+BaseAgent class - Base class for trading agents.
+
+Uses a simple tool system (no LangChain/MCP dependency).
 """
 
 import asyncio
 import json
 import os
-# Import project tools
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from langchain.agents import create_agent
-from langchain_core.globals import set_verbose, set_debug
-from langchain_core.messages import AIMessage
-from langchain_core.utils.function_calling import convert_to_openai_tool
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_openai import ChatOpenAI
 
-# Best-effort import for a console/stdout callback handler across LangChain versions
-try:  # langchain <=0.1 style
-    from langchain.callbacks.stdout import StdOutCallbackHandler as _ConsoleHandler  # type: ignore
-except Exception:  # langchain 0.2+/core split variants
-    try:
-        from langchain.callbacks import StdOutCallbackHandler as _ConsoleHandler  # type: ignore
-    except Exception:
-        try:
-            from langchain_core.callbacks.stdout import StdOutCallbackHandler as _ConsoleHandler  # type: ignore
-        except Exception:
-            _ConsoleHandler = None  # Fallback if handler not available
-
+# Add project root to path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
-
-class DeepSeekChatOpenAI(ChatOpenAI):
-    """
-    Custom ChatOpenAI wrapper for DeepSeek API compatibility.
-    Handles the case where DeepSeek returns tool_calls.args as JSON strings instead of dicts.
-    """
-
-    def _create_message_dicts(self, messages: list, stop: Optional[list] = None) -> list:
-        """Override to handle response parsing"""
-        message_dicts = super()._create_message_dicts(messages, stop)
-        return message_dicts
-
-    def _generate(self, messages: list, stop: Optional[list] = None, **kwargs):
-        """Override generation to fix tool_calls format in responses"""
-        # Call parent's generate method
-        result = super()._generate(messages, stop, **kwargs)
-
-        # Fix tool_calls format in the generated messages
-        for generation in result.generations:
-            for gen in generation:
-                if hasattr(gen, "message") and hasattr(gen.message, "additional_kwargs"):
-                    tool_calls = gen.message.additional_kwargs.get("tool_calls")
-                    if tool_calls:
-                        for tool_call in tool_calls:
-                            if "function" in tool_call and "arguments" in tool_call["function"]:
-                                args = tool_call["function"]["arguments"]
-                                # If arguments is a string, parse it
-                                if isinstance(args, str):
-                                    try:
-                                        tool_call["function"]["arguments"] = json.loads(args)
-                                    except json.JSONDecodeError:
-                                        pass  # Keep as string if parsing fails
-
-        return result
-
-    async def _agenerate(self, messages: list, stop: Optional[list] = None, **kwargs):
-        """Override async generation to fix tool_calls format in responses"""
-        # Call parent's async generate method
-        result = await super()._agenerate(messages, stop, **kwargs)
-
-        # Fix tool_calls format in the generated messages
-        for generation in result.generations:
-            for gen in generation:
-                if hasattr(gen, "message") and hasattr(gen.message, "additional_kwargs"):
-                    tool_calls = gen.message.additional_kwargs.get("tool_calls")
-                    if tool_calls:
-                        for tool_call in tool_calls:
-                            if "function" in tool_call and "arguments" in tool_call["function"]:
-                                args = tool_call["function"]["arguments"]
-                                # If arguments is a string, parse it
-                                if isinstance(args, str):
-                                    try:
-                                        tool_call["function"]["arguments"] = json.loads(args)
-                                    except json.JSONDecodeError:
-                                        pass  # Keep as string if parsing fails
-
-        return result
-
-
-from prompts.agent_prompt import STOP_SIGNAL, get_agent_system_prompt
-from tools.general_tools import (extract_conversation, extract_tool_messages,
-                                 get_config_value, write_config_value)
+from tools import get_all_schemas, get_tool
+from tools.general_tools import (
+    extract_conversation, extract_tool_messages,
+    get_config_value, write_config_value
+)
 from tools.price_tools import add_no_trade_record
 from tools.trading_db import (
     init_db, get_latest_position, append_position, append_no_trade_record,
@@ -107,209 +33,51 @@ from tools.trading_db import (
 load_dotenv()
 
 
-class BaseAgent:
-    """
-    Base class for trading agents
-
-    Main functionalities:
-    1. MCP tool management and connection
-    2. AI agent creation and configuration
-    3. Trading execution and decision loops
-    4. Logging and management
-    5. Position and configuration management
-    """
-
-    # Default NASDAQ 100 stock symbols
-    DEFAULT_STOCK_SYMBOLS = [
-        "NVDA",
-        "MSFT",
-        "AAPL",
-        "GOOG",
-        "GOOGL",
-        "AMZN",
-        "META",
-        "AVGO",
-        "TSLA",
-        "NFLX",
-        "PLTR",
-        "COST",
-        "ASML",
-        "AMD",
-        "CSCO",
-        "AZN",
-        "TMUS",
-        "MU",
-        "LIN",
-        "PEP",
-        "SHOP",
-        "APP",
-        "INTU",
-        "AMAT",
-        "LRCX",
-        "PDD",
-        "QCOM",
-        "ARM",
-        "INTC",
-        "BKNG",
-        "AMGN",
-        "TXN",
-        "ISRG",
-        "GILD",
-        "KLAC",
-        "PANW",
-        "ADBE",
-        "HON",
-        "CRWD",
-        "CEG",
-        "ADI",
-        "ADP",
-        "DASH",
-        "CMCSA",
-        "VRTX",
-        "MELI",
-        "SBUX",
-        "CDNS",
-        "ORLY",
-        "SNPS",
-        "MSTR",
-        "MDLZ",
-        "ABNB",
-        "MRVL",
-        "CTAS",
-        "TRI",
-        "MAR",
-        "MNST",
-        "CSX",
-        "ADSK",
-        "PYPL",
-        "FTNT",
-        "AEP",
-        "WDAY",
-        "REGN",
-        "ROP",
-        "NXPI",
-        "DDOG",
-        "AXON",
-        "ROST",
-        "IDXX",
-        "EA",
-        "PCAR",
-        "FAST",
-        "EXC",
-        "TTWO",
-        "XEL",
-        "ZS",
-        "PAYX",
-        "WBD",
-        "BKR",
-        "CPRT",
-        "CCEP",
-        "FANG",
-        "TEAM",
-        "CHTR",
-        "KDP",
-        "MCHP",
-        "GEHC",
-        "VRSK",
-        "CTSH",
-        "CSGP",
-        "KHC",
-        "ODFL",
-        "DXCM",
-        "TTD",
-        "ON",
-        "BIIB",
-        "LULU",
-        "CDW",
-        "GFS",
-    ]
+class SimpleAgent:
+    """Simple agent that uses OpenAI-compatible API with registered tools."""
 
     def __init__(
         self,
         signature: str,
         basemodel: str,
         stock_symbols: Optional[List[str]] = None,
-        mcp_config: Optional[Dict[str, Dict[str, Any]]] = None,
         log_path: Optional[str] = None,
         max_steps: int = 10,
-        max_retries: int = 3,
-        base_delay: float = 0.5,
         openai_base_url: Optional[str] = None,
         openai_api_key: Optional[str] = None,
         initial_cash: float = 10000.0,
         init_date: str = "2025-10-13",
-        market: str = "us",
-        verbose: bool = False
+        market: str = "us"
     ):
-        """
-        Initialize BaseAgent
-
-        Args:
-            signature: Agent signature/name
-            basemodel: Base model name
-            stock_symbols: List of stock symbols, defaults to NASDAQ 100 for US market
-            mcp_config: MCP tool configuration, including port and URL information
-            log_path: Log path, defaults to ./data/agent_data
-            max_steps: Maximum reasoning steps
-            max_retries: Maximum retry attempts
-            base_delay: Base delay time for retries
-            openai_base_url: OpenAI API base URL
-            openai_api_key: OpenAI API key
-            initial_cash: Initial cash amount
-            init_date: Initialization date
-            market: Market type, "us" for US stocks or "cn" for A-shares
-            verbose: Enable verbose output for LangChain agent
-        """
+        """Initialize the agent."""
         self.signature = signature
         self.basemodel = basemodel
         self.market = market
+        self.max_steps = max_steps
+        self.initial_cash = initial_cash
+        self.init_date = init_date
 
-        # Auto-select stock symbols based on market if not provided
+        # Auto-select stock symbols
         if stock_symbols is None:
             if market == "cn":
-                # Import A-shares symbols when needed
                 from prompts.agent_prompt import all_sse_50_symbols
-
                 self.stock_symbols = all_sse_50_symbols
             else:
-                # Default to US NASDAQ 100
-                self.stock_symbols = self.DEFAULT_STOCK_SYMBOLS
+                self.stock_symbols = self._default_us_symbols()
         else:
             self.stock_symbols = stock_symbols
 
-        self.max_steps = max_steps
-        self.max_retries = max_retries
-        self.base_delay = base_delay
-        self.initial_cash = initial_cash
-        self.init_date = init_date
-        self.verbose = verbose
+        # OpenAI config
+        self.openai_base_url = openai_base_url or os.getenv("OPENAI_API_BASE")
+        self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        if not self.openai_api_key:
+            raise ValueError("OpenAI API key not set")
 
-        # Set MCP configuration
-        self.mcp_config = mcp_config or self._get_default_mcp_config()
-
-        # Set log path
+        # Log path
         self.base_log_path = log_path or "./data/agent_data"
-
-        # Set OpenAI configuration
-        if openai_base_url == None:
-            self.openai_base_url = os.getenv("OPENAI_API_BASE")
-        else:
-            self.openai_base_url = openai_base_url
-        if openai_api_key == None:
-            self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        else:
-            self.openai_api_key = openai_api_key
-
-        # Initialize components
-        self.client: Optional[MultiServerMCPClient] = None
-        self.tools: Optional[List] = None
-        self.model: Optional[ChatOpenAI] = None
-        self.agent: Optional[Any] = None
-
-        # Data paths
         self.data_path = os.path.join(self.base_log_path, self.signature)
 
-        # Determine market for database
+        # Database setup
         if "astock" in str(self.base_log_path).lower():
             self._db_market = "astock"
         elif "crypto" in str(self.base_log_path).lower():
@@ -317,500 +85,184 @@ class BaseAgent:
         else:
             self._db_market = "agent_data"
 
-        # Initialize database
         self._db_path = get_db_path(self._db_market)
         init_db(self._db_path)
 
-    def _get_default_mcp_config(self) -> Dict[str, Dict[str, Any]]:
-        """Get default MCP configuration"""
-        return {
-            "math": {
-                "transport": "streamable_http",
-                "url": f"http://localhost:{os.getenv('MATH_HTTP_PORT', '8000')}/mcp",
-            },
-            "stock_local": {
-                "transport": "streamable_http",
-                "url": f"http://localhost:{os.getenv('GETPRICE_HTTP_PORT', '8003')}/mcp",
-            },
-            "search": {
-                "transport": "streamable_http",
-                "url": f"http://localhost:{os.getenv('SEARCH_HTTP_PORT', '8004')}/mcp",
-            },
-            "trade": {
-                "transport": "streamable_http",
-                "url": f"http://localhost:{os.getenv('TRADE_HTTP_PORT', '8002')}/mcp",
-            },
-        }
+        # Tool schemas for API
+        self.tool_schemas = get_all_schemas()
 
-    async def initialize(self) -> None:
-        """Initialize MCP client and AI model"""
-        print(f"🚀 Initializing agent: {self.signature}")
+        # API client (set in run)
+        self.client = None
 
-        # Set LangChain verbose mode if enabled
-        if self.verbose:
-            # Enable both verbose and debug for richer event logs
-            set_verbose(True)
-            try:
-                set_debug(True)
-            except Exception:
-                pass
-            print("🔍 LangChain verbose mode enabled (with debug)")
-
-        # Validate OpenAI configuration
-        if not self.openai_api_key:
-            raise ValueError(
-                "❌ OpenAI API key not set. Please configure OPENAI_API_KEY in environment or config file."
-            )
-        if not self.openai_base_url:
-            print("⚠️  OpenAI base URL not set, using default")
-
-        try:
-            # Create MCP client
-            self.client = MultiServerMCPClient(self.mcp_config)
-
-            # Get tools
-            self.tools = await self.client.get_tools()
-            if not self.tools:
-                print("⚠️  Warning: No MCP tools loaded. MCP services may not be running.")
-                print(f"   MCP configuration: {self.mcp_config}")
-            else:
-                print(f"✅ Loaded {len(self.tools)} MCP tools")
-                if self.verbose:
-                    try:
-                        tool_names = []
-                        for t in self.tools:
-                            name = getattr(t, "name", None) or getattr(t, "__name__", "<unknown>")
-                            tool_names.append(name)
-                        print(f"🔧 Tools: {', '.join(tool_names)}")
-                    except Exception:
-                        pass
-        except Exception as e:
-            raise RuntimeError(
-                f"❌ Failed to initialize MCP client: {e}\n"
-                f"   Please ensure MCP services are running at the configured ports.\n"
-                f"   Run: python agent_tools/start_mcp_services.py"
-            )
-
-        try:
-            # Create AI model - use custom DeepSeekChatOpenAI for DeepSeek models
-            # to handle tool_calls.args format differences (JSON string vs dict)
-            if "deepseek" in self.basemodel.lower():
-                self.model = DeepSeekChatOpenAI(
-                    model=self.basemodel,
-                    base_url=self.openai_base_url,
-                    api_key=self.openai_api_key,
-                    max_retries=3,
-                    timeout=30,
-                )
-            else:
-                self.model = ChatOpenAI(
-                    model=self.basemodel,
-                    base_url=self.openai_base_url,
-                    api_key=self.openai_api_key,
-                    max_retries=3,
-                    timeout=30,
-                )
-        except Exception as e:
-            raise RuntimeError(f"❌ Failed to initialize AI model: {e}")
-
-        # Note: agent will be created in run_trading_session() based on specific date
-        # because system_prompt needs the current date and price information
-
-        print(f"✅ Agent {self.signature} initialization completed")
+    def _default_us_symbols(self) -> List[str]:
+        """Default US stock symbols (NASDAQ 100)."""
+        return [
+            "NVDA", "MSFT", "AAPL", "GOOG", "GOOGL", "AMZN", "META", "AVGO",
+            "TSLA", "NFLX", "PLTR", "COST", "ASML", "AMD", "CSCO", "AZN",
+            "TMUS", "MU", "LIN", "PEP", "SHOP", "APP", "INTU", "AMAT",
+            "LRCX", "PDD", "QCOM", "ARM", "INTC", "BKNG", "AMGN", "TXN",
+            "ISRG", "GILD", "KLAC", "PANW", "ADBE", "HON", "CRWD", "CEG",
+            "ADI", "ADP", "DASH", "CMCSA", "VRTX", "MELI", "SBUX", "CDNS",
+            "ORLY", "SNPS", "MSTR", "MDLZ", "ABNB", "MRVL", "CTAS", "TRI",
+            "MAR", "MNST", "CSX", "ADSK", "PYPL", "FTNT", "AEP", "WDAY",
+            "REGN", "ROP", "NXPI", "DDOG", "AXON", "ROST", "IDXX", "EA",
+            "PCAR", "FAST", "EXC", "TTWO", "XEL", "ZS", "PAYX", "WBD",
+            "BKR", "CPRT", "CCEP", "FANG", "TEAM", "CHTR", "KDP", "MCHP",
+            "GEHC", "VRSK", "CTSH", "CSGP", "KHC", "ODFL", "DXCM", "TTD",
+            "ON", "BIIB", "LULU", "CDW", "GFS"
+        ]
 
     def _setup_logging(self, today_date: str) -> str:
-        """Set up log file path"""
+        """Set up log file path."""
         log_path = os.path.join(self.base_log_path, self.signature, "log", today_date)
         if not os.path.exists(log_path):
             os.makedirs(log_path)
         return os.path.join(log_path, "log.jsonl")
 
     def _log_message(self, log_file: str, new_messages: List[Dict[str, str]]) -> None:
-        """Log messages to log file"""
+        """Log messages to file."""
         log_entry = {
-            # "timestamp": datetime.now().isoformat(),
             "signature": self.signature,
             "new_messages": new_messages
         }
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
-    def _log_tool_error(self, today_date: str, tool_name: str, error: str, details: Dict = None) -> None:
-        """Log tool call errors to database and file.
+    async def call_api(self, messages: List[Dict], tools: bool = True) -> Dict:
+        """Call OpenAI-compatible API."""
+        import httpx
 
-        Args:
-            today_date: Trading date
-            tool_name: Name of the tool that failed
-            error: Error message
-            details: Additional error details
-        """
-        # Log to database
-        try:
-            log_content = json.dumps({
-                "type": "tool_error",
-                "tool": tool_name,
-                "error": error,
-                "details": details or {}
-            }, ensure_ascii=False)
-            append_log(self.signature, today_date, "tool_error", log_content, get_db_path(self._db_market), self._db_market)
-        except Exception as e:
-            print(f"Failed to log tool error to database: {e}")
-
-        # Also log to file
-        log_file = self._setup_logging(today_date)
-        log_entry = {
-            "signature": self.signature,
-            "log_type": "tool_error",
-            "tool": tool_name,
-            "error": error,
-            "details": details or {}
+        headers = {
+            "Authorization": f"Bearer {self.openai_api_key}",
+            "Content-Type": "application/json"
         }
-        try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-        except Exception as e:
-            print(f"Failed to log tool error to file: {e}")
 
-    def _log_trading_action(self, today_date: str, action_type: str, symbol: str, amount: int, price: float, result: str, position: Dict = None) -> None:
-        """Log trading actions (buy/sell/no_trade) to database and file.
-
-        Args:
-            today_date: Trading date
-            action_type: Type of action (buy, sell, no_trade)
-            symbol: Stock symbol
-            amount: Amount traded
-            price: Trade price
-            result: Result of the action (success, failed)
-            position: Current position after action
-        """
-        # Log to database
-        try:
-            log_content = json.dumps({
-                "type": "trading_action",
-                "action": action_type,
-                "symbol": symbol,
-                "amount": amount,
-                "price": price,
-                "result": result,
-                "position": position
-            }, ensure_ascii=False)
-            append_log(self.signature, today_date, "trading_action", log_content, get_db_path(self._db_market), self._db_market)
-        except Exception as e:
-            print(f"Failed to log trading action to database: {e}")
-
-        # Also log to file
-        log_file = self._setup_logging(today_date)
-        log_entry = {
-            "signature": self.signature,
-            "log_type": "trading_action",
-            "action": action_type,
-            "symbol": symbol,
-            "amount": amount,
-            "price": price,
-            "result": result,
-            "position": position
+        payload = {
+            "model": self.basemodel,
+            "messages": messages,
+            "max_tokens": 4096
         }
-        try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-        except Exception as e:
-            print(f"Failed to log trading action to file: {e}")
 
-    def _log_session_event(self, today_date: str, event_type: str, details: Dict) -> None:
-        """Log session events (start, end, error, etc.) to database and file.
+        if tools and self.tool_schemas:
+            payload["tools"] = self.tool_schemas
 
-        Args:
-            today_date: Trading date
-            event_type: Type of event (session_start, session_end, error, etc.)
-            details: Event details
-        """
-        # Log to database
-        try:
-            log_content = json.dumps({
-                "type": "session_event",
-                "event": event_type,
-                "details": details
-            }, ensure_ascii=False)
-            append_log(self.signature, today_date, "session_event", log_content, get_db_path(self._db_market), self._db_market)
-        except Exception as e:
-            print(f"Failed to log session event to database: {e}")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{self.openai_base_url}/chat/completions",
+                headers=headers,
+                json=payload
+            )
+            response.raise_for_status()
+            return response.json()
 
-        # Also log to file
+    def execute_tool(self, name: str, args: Dict) -> Any:
+        """Execute a registered tool."""
+        tool = get_tool(name)
+        if tool is None:
+            return {"error": f"Unknown tool: {name}"}
+        return tool.func(**args)
+
+    async def run_session(self, today_date: str) -> None:
+        """Run a trading session."""
+        print(f"📈 Running session: {self.signature} - {today_date}")
+
+        # Set config
+        write_config_value("TODAY_DATE", today_date)
+        write_config_value("SIGNATURE", self.signature)
+
         log_file = self._setup_logging(today_date)
-        log_entry = {
-            "signature": self.signature,
-            "log_type": "session_event",
-            "event": event_type,
-            "details": details
-        }
-        try:
-            with open(log_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
-        except Exception as e:
-            print(f"Failed to log session event to file: {e}")
 
-    async def _ainvoke_with_retry(self, message: List[Dict[str, str]]) -> Any:
-        """Agent invocation with retry"""
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                if self.verbose:
-                    print(f"🤖 Calling LLM API ({self.basemodel})...")
-                return await self.agent.ainvoke({"messages": message}, {"recursion_limit": 100})
-            except Exception as e:
-                if attempt == self.max_retries:
-                    raise e
-                print(f"⚠️ Attempt {attempt} failed, retrying after {self.base_delay * attempt} seconds...")
-                print(f"Error details: {e}")
-                await asyncio.sleep(self.base_delay * attempt)
+        # Get system prompt
+        from prompts.agent_prompt import get_agent_system_prompt
+        system_prompt = get_agent_system_prompt(today_date, self.signature, self.market, self.stock_symbols)
 
-    async def run_trading_session(self, today_date: str) -> None:
-        """
-        Run single day trading session
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.append({"role": "user", "content": f"Please analyze and update positions for {today_date}."})
 
-        Args:
-            today_date: Trading date
-        """
-        print(f"📈 Starting trading session: {today_date}")
+        self._log_message(log_file, messages[-1:])
 
-        # Set up logging
-        log_file = self._setup_logging(today_date)
-        write_config_value("LOG_FILE", log_file)
-        # Update system prompt
-        self.agent = create_agent(
-            self.model,
-            tools=self.tools,
-            system_prompt=get_agent_system_prompt(today_date, self.signature, self.market, self.stock_symbols),
-        )
-        # If verbose, try to attach console callbacks to the agent itself
-        if self.verbose and _ConsoleHandler is not None:
-            try:
-                handler = _ConsoleHandler()
-                self.agent = self.agent.with_config({
-                    "callbacks": [handler],
-                    "tags": [self.signature, today_date],
-                    "run_name": f"{self.signature}-session"
+        step = 0
+        while step < self.max_steps:
+            step += 1
+            print(f"🔄 Step {step}/{self.max_steps}")
+
+            # Call API
+            response = await self.call_api(messages)
+
+            choice = response["choices"][0]
+            message = choice["message"]
+
+            # Check for stop signal
+            from prompts.agent_prompt import STOP_SIGNAL
+            if STOP_SIGNAL in message.get("content", ""):
+                print("✅ Stop signal received")
+                break
+
+            # Handle tool calls
+            if "tool_calls" in message:
+                tool_calls = message["tool_calls"]
+                tool_results = []
+
+                for tc in tool_calls:
+                    tool_name = tc["function"]["name"]
+                    arguments = json.loads(tc["function"]["arguments"])
+
+                    print(f"   🔧 Calling {tool_name}: {arguments}")
+                    try:
+                        result = self.execute_tool(tool_name, arguments)
+                        print(f"   ✅ Result: {str(result)[:100]}...")
+                    except Exception as e:
+                        result = {"error": str(e)}
+                        print(f"   ❌ Error: {e}")
+
+                    tool_results.append({
+                        "tool_call_id": tc["id"],
+                        "role": "tool",
+                        "name": tool_name,
+                        "content": str(result)
+                    })
+
+                # Add assistant message and tool results
+                messages.append({
+                    "role": "assistant",
+                    "content": message.get("content", ""),
+                    "tool_calls": tool_calls
                 })
-            except Exception:
-                pass
-        elif self.verbose and _ConsoleHandler is None:
-            print("⚠️ Verbose requested but no StdOut/Console callback handler found in current LangChain version.")
+                messages.extend(tool_results)
+            else:
+                # No tool calls, regular response
+                messages.append({"role": "assistant", "content": message.get("content", "")})
+                self._log_message(log_file, [{"role": "assistant", "content": message.get("content", "")}])
+                break
 
-        # Initial user query
-        user_query = [{"role": "user", "content": f"Please analyze and update today's ({today_date}) positions."}]
-        message = user_query.copy()
-
-        # Log initial message
-        self._log_message(log_file, user_query)
-
-        # Trading loop
-        current_step = 0
-        while current_step < self.max_steps:
-            current_step += 1
-            print(f"🔄 Step {current_step}/{self.max_steps}")
-
-            try:
-                # Call agent
-                response = await self._ainvoke_with_retry(message)
-
-                # Extract agent response
-                agent_response = extract_conversation(response, "final")
-
-                # Check stop signal
-                if STOP_SIGNAL in agent_response:
-                    print("✅ Received stop signal, trading session ended")
-                    print(agent_response)
-                    self._log_message(log_file, [{"role": "assistant", "content": agent_response}])
-                    break
-
-                # Extract tool messages
-                tool_msgs = extract_tool_messages(response)
-                tool_response = "\n".join([msg.content for msg in tool_msgs])
-
-                # Prepare new messages
-                new_messages = [
-                    {"role": "assistant", "content": agent_response},
-                    {"role": "user", "content": f"Tool results: {tool_response}"},
-                ]
-
-                # Add new messages
-                message.extend(new_messages)
-
-                # Log messages
-                self._log_message(log_file, new_messages[0])
-                self._log_message(log_file, new_messages[1])
-
-            except Exception as e:
-                print(f"❌ Trading session error: {str(e)}")
-                print(f"Error details: {e}")
-                raise
-
-        # Handle trading results
-        await self._handle_trading_result(today_date)
-
-    async def _handle_trading_result(self, today_date: str) -> None:
-        """Handle trading results"""
+        # Handle results
         if_trade = get_config_value("IF_TRADE")
         if if_trade:
             write_config_value("IF_TRADE", False)
             print("✅ Trading completed")
         else:
-            print("📊 No trading, maintaining positions")
-            try:
-                add_no_trade_record(today_date, self.signature)
-            except NameError as e:
-                print(f"❌ NameError: {e}")
-                raise
+            print("📊 No trading")
+            add_no_trade_record(today_date, self.signature)
             write_config_value("IF_TRADE", False)
 
-    def register_agent(self) -> None:
-        """Register new agent, create initial positions"""
-        # Check if position already exists in database
+    def register(self) -> None:
+        """Register agent with initial position."""
         if check_position_exists(self.signature, self._db_path):
-            print(f"⚠️ Position for {self.signature} already exists in database, skipping registration")
+            print(f"⚠️ {self.signature} already registered")
             return
 
-        # Create initial positions
-        init_position = {symbol: 0 for symbol in self.stock_symbols}
+        init_position = {s: 0 for s in self.stock_symbols}
         init_position["CASH"] = self.initial_cash
 
-        # Use database instead of JSONL
         append_position(
-            signature=self.signature,
-            date=self.init_date,
-            action_type="init",
-            symbol="",
-            amount=0,
-            positions=init_position,
-            db_path=self._db_path,
-            market=self._db_market
+            signature=self.signature, date=self.init_date, action_type="init",
+            symbol="", amount=0, positions=init_position,
+            db_path=self._db_path, market=self._db_market
         )
 
-        print(f"✅ Agent {self.signature} registration completed")
-        print(f"📁 Database: {self._db_path}")
-        currency_symbol = "¥" if self.market == "cn" else "$"
-        print(f"💰 Initial cash: {currency_symbol}{self.initial_cash:,.2f}")
-        print(f"📊 Number of stocks: {len(self.stock_symbols)}")
+        currency = "¥" if self.market == "cn" else "$"
+        print(f"✅ {self.signature} registered with {currency}{self.initial_cash:,.2f}")
 
-    def get_trading_dates(self, init_date: str, end_date: str) -> List[str]:
-        """
-        Get trading date list, filtered by actual trading days in merged.jsonl
 
-        Args:
-            init_date: Start date
-            end_date: End date
-
-        Returns:
-            List of trading dates (excluding weekends and holidays)
-        """
-        from tools.price_tools import is_trading_day
-
-        # Check if position exists in database
-        if not check_position_exists(self.signature, self._db_path):
-            self.register_agent()
-            max_date = init_date
-        else:
-            # Get latest position from database
-            latest_pos, _ = get_latest_position(self.signature, self._db_path, self._db_market)
-            max_date = latest_pos.get("date", init_date)
-
-        # Check if new dates need to be processed
-        max_date_obj = datetime.strptime(max_date, "%Y-%m-%d")
-        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
-
-        if end_date_obj <= max_date_obj:
-            return []
-
-        # Generate trading date list, filtered by actual trading days
-        trading_dates = []
-        current_date = max_date_obj + timedelta(days=1)
-
-        while current_date <= end_date_obj:
-            date_str = current_date.strftime("%Y-%m-%d")
-            # Check if this is an actual trading day in merged.jsonl
-            if is_trading_day(date_str, market=self.market):
-                trading_dates.append(date_str)
-            current_date += timedelta(days=1)
-
-        return trading_dates
-
-    async def run_with_retry(self, today_date: str) -> None:
-        """Run method with retry"""
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                print(f"🔄 Attempting to run {self.signature} - {today_date} (Attempt {attempt})")
-                await self.run_trading_session(today_date)
-                print(f"✅ {self.signature} - {today_date} run successful")
-                return
-            except Exception as e:
-                print(f"❌ Attempt {attempt} failed: {str(e)}")
-                if attempt == self.max_retries:
-                    print(f"💥 {self.signature} - {today_date} all retries failed")
-                    raise
-                else:
-                    wait_time = self.base_delay * attempt
-                    print(f"⏳ Waiting {wait_time} seconds before retry...")
-                    await asyncio.sleep(wait_time)
-
-    async def run_date_range(self, init_date: str, end_date: str) -> None:
-        """
-        Run all trading days in date range
-
-        Args:
-            init_date: Start date
-            end_date: End date
-        """
-        print(f"📅 Running date range: {init_date} to {end_date}")
-
-        # Get trading date list
-        trading_dates = self.get_trading_dates(init_date, end_date)
-
-        if not trading_dates:
-            print(f"ℹ️ No trading days to process")
-            return
-
-        print(f"📊 Trading days to process: {trading_dates}")
-
-        # Process each trading day
-        for date in trading_dates:
-            print(f"🔄 Processing {self.signature} - Date: {date}")
-
-            # Set configuration
-            write_config_value("TODAY_DATE", date)
-            write_config_value("SIGNATURE", self.signature)
-
-            try:
-                await self.run_with_retry(date)
-            except Exception as e:
-                print(f"❌ Error processing {self.signature} - Date: {date}")
-                print(e)
-                raise
-
-        print(f"✅ {self.signature} processing completed")
-
-    def get_position_summary(self) -> Dict[str, Any]:
-        """Get position summary"""
-        # Check if position exists in database
-        if not check_position_exists(self.signature, self._db_path):
-            return {"error": "Position does not exist in database"}
-
-        # Get position history from database
-        positions = get_position_history(self.signature, self._db_path)
-
-        if not positions:
-            return {"error": "No position records"}
-
-        latest_position = positions[-1]
-        return {
-            "signature": self.signature,
-            "latest_date": latest_position.get("date"),
-            "positions": latest_position.get("positions", {}),
-            "total_records": len(positions),
-        }
-
-    def __str__(self) -> str:
-        return (
-            f"BaseAgent(signature='{self.signature}', basemodel='{self.basemodel}', stocks={len(self.stock_symbols)})"
-        )
-
-    def __repr__(self) -> str:
-        return self.__str__()
+# Keep backward compatibility - BaseAgent now points to SimpleAgent
+BaseAgent = SimpleAgent

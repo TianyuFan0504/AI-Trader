@@ -2,6 +2,6 @@
 Base trading agent module
 """
 
-from .base_agent import BaseAgent
+from .base_agent import SimpleAgent as BaseAgent
 
 __all__ = ["BaseAgent"]

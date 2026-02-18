@@ -1,0 +1,97 @@
+{
+  "description": "Example configurations for different API modes",
+  "examples": [
+    {
+      "name": "Local Database (Default)",
+      "config": {
+        "data_source": {
+          "price": "local",
+          "search": "local",
+          "news": "local"
+        },
+        "trading_mode": "simulation"
+      },
+      "api_key_required": false,
+      "use_case": "Historical backtesting with local data"
+    },
+    {
+      "name": "Yahoo Finance (Free, Delayed)",
+      "config": {
+        "data_source": {
+          "price": "yahoo",
+          "search": "local",
+          "news": "local"
+        },
+        "trading_mode": "simulation"
+      },
+      "api_key_required": false,
+      "use_case": "Free real-time-ish data for US stocks",
+      "notes": "Data delayed by ~15 minutes"
+    },
+    {
+      "name": "Alpaca Paper Trading",
+      "config": {
+        "data_source": {
+          "price": "alpaca",
+          "search": "local",
+          "news": "local"
+        },
+        "trading_mode": "paper"
+      },
+      "api_key_required": {
+        "ALPACA_API_KEY": "your_paper_api_key",
+        "ALPACA_API_SECRET": "your_paper_api_secret",
+        "ALPACA_BASE_URL": "https://paper-api.alpaca.markets"
+      },
+      "use_case": "Paper trading with real-time data",
+      "notes": "No real money, safe for testing"
+    },
+    {
+      "name": "Alpaca Live Trading",
+      "config": {
+        "data_source": {
+          "price": "alpaca",
+          "search": "local",
+          "news": "local"
+        },
+        "trading_mode": "live"
+      },
+      "api_key_required": {
+        "ALPACA_API_KEY": "your_live_api_key",
+        "ALPACA_API_SECRET": "your_live_api_secret",
+        "ALPACA_BASE_URL": "https://api.alpaca.markets"
+      },
+      "use_case": "Live trading with real money",
+      "notes": "⚠️ WARNING: Real money at risk!"
+    },
+    {
+      "name": "Tushare Pro (China A-Shares)",
+      "config": {
+        "data_source": {
+          "price": "tushare",
+          "search": "local",
+          "news": "local"
+        },
+        "trading_mode": "paper"
+      },
+      "api_key_required": {
+        "TUSHARE_TOKEN": "your_tushare_token"
+      },
+      "use_case": "China A-share data and paper trading",
+      "notes": "Requires paid Tushare Pro subscription"
+    },
+    {
+      "name": "Mixed: Yahoo + Tushare",
+      "config": {
+        "data_source": {
+          "price": "yahoo",
+          "search": "local",
+          "news": "local"
+        },
+        "trading_mode": "simulation"
+      },
+      "api_key_required": false,
+      "use_case": "Multi-market with free data"
+    }
+  ]
+}
