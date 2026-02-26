@@ -1,0 +1,32 @@
+{
+  "agent_type": "BaseAgent",
+  "market": "us",
+  "date_range": {
+    "init_date": "2025-11-07",
+    "end_date": "2025-11-10"
+  },
+  "models": [
+    {
+      "name": "MiniMax-M2.5",
+      "basemodel": "minimax/minimax-m2.5",
+      "signature": "MiniMax-M2.5",
+      "enabled": true
+    }
+  ],
+  "agent_config": {
+    "max_steps": 5,
+    "max_retries": 1,
+    "base_delay": 1.0,
+    "initial_cash": 10000.0,
+    "verbose": true
+  },
+  "log_config": {
+    "log_path": "./data/agent_data"
+  },
+  "data_source": {
+    "price": "local",
+    "search": "local",
+    "news": "local"
+  },
+  "trading_mode": "simulation"
+}
